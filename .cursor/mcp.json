@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "stellar-agent-gateway": {
+      "command": "cargo",
+      "args": ["run", "--release", "-p", "stellar-mcp-server"],
+      "env": {
+        "RUST_LOG": "stellar_mcp_server=info,rmcp=warn",
+        "AGENT_SECRET_KEY": "${AGENT_SECRET_KEY}",
+        "STELLAR_RPC_URL": "https://soroban-testnet.stellar.org",
+        "FACILITATOR_URL": "https://channels.openzeppelin.com/x402/testnet",
+        "FACILITATOR_API_KEY": "${FACILITATOR_API_KEY}"
+      }
+    }
+  }
+}
