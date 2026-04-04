@@ -102,8 +102,7 @@ async fn call_x402_api(
 
             let payment_payload = serde_json::json!({
                 "x402Version": 2,
-                "scheme": "exact",
-                "network": requirements.network,
+                "accepted": requirements,
                 "payload": { "transaction": tx_xdr }
             });
 

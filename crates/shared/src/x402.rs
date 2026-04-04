@@ -41,8 +41,7 @@ pub struct StellarPayload {
 #[serde(rename_all = "camelCase")]
 pub struct PaymentPayload {
     pub x402_version: u32,
-    pub scheme: String,
-    pub network: String,
+    pub accepted: PaymentRequirements,
     pub payload: StellarPayload,
 }
 

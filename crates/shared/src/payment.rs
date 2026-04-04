@@ -132,9 +132,11 @@ pub async fn sign_x402_payment(
     // D: Parse payment amount (USDC has 7 decimals; "10000" = $0.001)
     let amount_parts = parse_i128_amount(&requirements.amount)?;
 
-    // E: Get current ledger, set expiry to +60 ledgers (~5 minutes)
+    // E: Get current ledger, set expiry within facilitator's allowed window.
+    //    Facilitator allows: ceil(maxTimeoutSeconds / 5) ledgers from current.
+    //    maxTimeoutSeconds=60 → max 12 ledgers. Use 10 for safety margin.
     let latest_ledger = get_latest_ledger(rpc_url).await?;
-    let signature_expiration_ledger: u32 = latest_ledger + 60;
+    let signature_expiration_ledger: u32 = latest_ledger + 10;
 
     // F: Random nonce for replay protection
     let nonce: i64 = rand::thread_rng().gen_range(0..i64::MAX);
@@ -210,10 +212,11 @@ pub async fn sign_x402_payment(
     };
 
     // M: Build the Transaction
-    //    fee=100 and seq_num=0 are placeholders — the facilitator replaces them.
+    //    fee and seq_num are placeholders — the facilitator fee-bumps.
+    //    Facilitator validates fee >= minimum (10M stroops for Soroban).
     let tx = Transaction {
         source_account: MuxedAccount::Ed25519(Uint256(pubkey_bytes)),
-        fee: 100,
+        fee: 1_000_000,
         seq_num: SequenceNumber(0),
         cond: Preconditions::None,
         memo: Memo::None,

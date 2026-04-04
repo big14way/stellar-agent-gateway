@@ -6,11 +6,13 @@ members = [
     "crates/shared",
     "crates/x402-services",
     "crates/mcp-server",
+    "crates/e2e-test",
 ]
 default-members = [
     "crates/shared",
     "crates/x402-services",
     "crates/mcp-server",
+    "crates/e2e-test",
 ]
 
 [workspace.dependencies]
