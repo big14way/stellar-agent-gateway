@@ -1,6 +1,31 @@
 # Stellar Agent Gateway
 
-An x402-powered agent service marketplace on Stellar where Claude autonomously pays for API tools using real USDC micropayments via Soroban authorization entry signing. When an AI agent calls a tool, the MCP server intercepts the HTTP 402 response, cryptographically signs a Soroban auth entry for the USDC transfer, and retries with the payment header — all without human intervention. The OZ Facilitator verifies and settles the payment on-chain. Built for the Stellar Hacks: Agents hackathon (April 2026).
+An x402-powered agent service marketplace on Stellar where AI agents autonomously pay for API tools using real USDC micropayments via Soroban authorization entry signing. When an agent calls a tool, the MCP server intercepts the HTTP 402 response, cryptographically signs a Soroban auth entry for the USDC transfer, and retries with the payment header — all without human intervention. The OZ Facilitator verifies and settles the payment on-chain. Built for the Stellar Hacks: Agents hackathon (April 2026).
+
+## Live Demo
+
+**Dashboard:** [stellar-agent-gateway.vercel.app](https://stellar-agent-gateway.vercel.app)
+Shows live agent/server USDC balances, registered services, transaction feed, and x402 payment flow diagram. Account data updates in real-time from Stellar Horizon — no wallet extension needed.
+
+**On-chain contracts (Stellar Testnet):**
+- ServiceRegistry: [`CAJZB47S...`](https://stellar.expert/explorer/testnet/contract/CAJZB47SSVIORFB4J7AHFVSA2HOSQU2YX4KJ5DORL4KK5EUX4AUSQJ4Y) — 3 services registered
+- SmartAccount: [`CCRXBYAV...`](https://stellar.expert/explorer/testnet/contract/CCRXBYAVZBCBYLYCZCJPLO22LYAIZGLR4QCJNFCHOZL2WAQJFWVGV7R3) — OZ policy-based spending
+
+**Agent account:** [`GCLLO5UE...`](https://stellar.expert/explorer/testnet/account/GCLLO5UEXQ5KS3WSSBFTZ4S3TJMJHKDCDIMU7WUIECSKDZJMEDX22AE7) — view x402 payment transactions on Stellar Expert
+
+### Run the E2E Demo Locally
+
+The full payment flow (sign → pay → settle → data) runs locally. The dashboard on Vercel updates in real-time as payments settle.
+
+```bash
+# Terminal 1: Start x402 services
+make dev-services
+
+# Terminal 2: Run the demo (3 paid API calls, real USDC on-chain)
+cargo run -p e2e-test
+```
+
+The demo shows an AI agent performing a portfolio analysis — calling 3 live APIs (Stellar DEX price, Horizon account data, weather), paying $0.001 USDC per call, and synthesizing the results. Watch the dashboard balances update as payments settle.
 
 ## Architecture
 
@@ -35,18 +60,18 @@ An x402-powered agent service marketplace on Stellar where Claude autonomously p
 
 | Component | Language | Description |
 |-----------|----------|-------------|
-| **ServiceRegistry** | Soroban (Rust) | On-chain service discovery. Stores service name, URL, price, owner, and tags. Deployed at `CAJZB47SSVIORFB4J7AHFVSA2HOSQU2YX4KJ5DORL4KK5EUX4AUSQJ4Y` |
-| **SmartAccount** | Soroban (Rust) | OpenZeppelin policy-based spending limits using `stellar-accounts` v0.6.0. Supports `Signer::Delegated` for agent G-address auth over USDC transfers. Deployed at `CCRXBYAVZBCBYLYCZCJPLO22LYAIZGLR4QCJNFCHOZL2WAQJFWVGV7R3` |
-| **x402-services** | Rust (Axum) | HTTP server with 3 API routes gated by x402 micropayments. Returns 402 with payment requirements, verifies via OZ Facilitator, settles on-chain in background |
-| **stellar-mcp-server** | Rust (rmcp) | MCP server exposing 4 tools to Claude. Handles the full x402 flow: request → 402 → sign Soroban auth entry → retry with payment header |
-| **Dashboard** | Next.js 15 / React 19 | Service catalog, Freighter wallet connect, live XLM/USDC balances, transaction feed from Horizon |
+| **ServiceRegistry** | Soroban (Rust) | On-chain service discovery. Stores service name, URL, price, owner, and tags |
+| **SmartAccount** | Soroban (Rust) | OpenZeppelin policy-based spending limits using `stellar-accounts` v0.6.0 |
+| **x402-services** | Rust (Axum) | 3 API routes gated by x402. Live data from Stellar DEX, Horizon, and wttr.in |
+| **stellar-mcp-server** | Rust (rmcp) | 4 MCP tools for Claude. Real x402 signing with ed25519 over Soroban auth entries |
+| **e2e-test** | Rust | Demo binary: multi-step agent scenario with on-chain settlement verification |
+| **Dashboard** | Next.js 16 / React 19 | Live balances, tx feed, service catalog. Deployed on Vercel |
 
 ## Prerequisites
 
 - **Rust 1.80+** with `wasm32v1-none` target (`rustup target add wasm32v1-none`)
 - **Node.js 22+**
 - **Stellar CLI 25.x** (`stellar --version`)
-- **Freighter wallet** browser extension (for dashboard)
 - **OZ Facilitator API key** from https://channels.openzeppelin.com/testnet/gen
 - **Test USDC** from https://faucet.circle.com (Stellar Testnet)
 
@@ -82,8 +107,8 @@ bash scripts/deploy-contracts.sh
 
 ```bash
 bash scripts/setup-agent.sh
-# Then visit https://faucet.circle.com → Stellar Testnet → paste AGENT address
-# Also fund the SERVER address with test USDC
+# Then visit https://faucet.circle.com → Stellar Testnet
+# Fund both AGENT and SERVER addresses with test USDC
 ```
 
 ### 5. Register services on-chain
@@ -92,48 +117,38 @@ bash scripts/setup-agent.sh
 bash scripts/register-services.sh
 ```
 
-### 6. Start the x402 services server
+### 6. Run the full demo
 
 ```bash
+# Terminal 1: Start x402 services
 make dev-services
-# Verify: curl http://localhost:3001/health
-# Paid routes return 402: curl http://localhost:3001/weather?city=Lagos
+
+# Terminal 2: Run end-to-end payment demo
+cargo run -p e2e-test
+
+# Optional: Dashboard (also live at stellar-agent-gateway.vercel.app)
+cd dashboard && npm install && npm run dev
 ```
 
-### 7. Run integration tests
-
-```bash
-bash scripts/test-integration.sh
-```
-
-### 8. Connect to Claude
+### 7. Connect to Claude (optional)
 
 **Cursor:** MCP config is at `.cursor/mcp.json` — set env vars and restart.
 
 **Claude Desktop:** See [docs/add-to-claude-desktop.md](docs/add-to-claude-desktop.md).
 
-### 9. Launch the dashboard
-
-```bash
-cd dashboard && npm install && npm run dev
-# Open http://localhost:3000
-```
-
 ## x402 Payment Flow
 
-1. **Claude calls a tool** (e.g., `get_weather(city: "Lagos")`) via MCP JSON-RPC
-2. **MCP server** sends `GET /weather?city=Lagos` to x402-services
-3. **x402-services** returns **HTTP 402** with `PAYMENT-REQUIRED` header containing base64-encoded payment requirements (amount, USDC contract, pay-to address)
-4. **MCP server** decodes the requirements and calls `sign_x402_payment()`
-5. **Payment signer** builds a `SorobanAuthorizationEntry` for `transfer(agent, server, amount)` on the USDC SAC, signs it with the agent's ed25519 key, and wraps it in a `TransactionEnvelope`
-6. **MCP server** retries the request with `PAYMENT-SIGNATURE` header containing the base64-encoded signed transaction XDR
-7. **x402-services middleware** sends the payment to the **OZ Facilitator** for verification
-8. **Facilitator** verifies the auth entry, fee-bumps the transaction, and submits it to **Stellar Testnet** — USDC is transferred from agent to server on-chain
-9. **x402-services** returns **HTTP 200** with the actual data, which flows back to Claude
+1. **Agent calls API** (e.g., `GET /weather?city=Lagos`)
+2. **Server returns HTTP 402** with `PAYMENT-REQUIRED` header (amount, USDC contract, pay-to address)
+3. **Agent signs Soroban auth entry** — ed25519 over `transfer(agent, server, amount)` on USDC SAC
+4. **Agent retries** with `PAYMENT-SIGNATURE` header containing signed transaction XDR
+5. **Server forwards to OZ Facilitator** for verification
+6. **Facilitator fee-bumps and submits** to Stellar Testnet — real USDC transfer settles on-chain
+7. **Server returns HTTP 200** with live data (Stellar DEX price, Horizon account data, weather)
 
 ## Smart Contract Details
 
-### ServiceRegistry (`CAJZB47SSVIORFB4J7AHFVSA2HOSQU2YX4KJ5DORL4KK5EUX4AUSQJ4Y`)
+### ServiceRegistry ([`CAJZB47S...`](https://stellar.expert/explorer/testnet/contract/CAJZB47SSVIORFB4J7AHFVSA2HOSQU2YX4KJ5DORL4KK5EUX4AUSQJ4Y))
 
 On-chain service catalog with 8 functions:
 
@@ -145,35 +160,30 @@ On-chain service catalog with 8 functions:
 - `update_price(id, new_price)` — owner-only
 - `get_count()` → total registered
 
-[View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CAJZB47SSVIORFB4J7AHFVSA2HOSQU2YX4KJ5DORL4KK5EUX4AUSQJ4Y)
-
-### SmartAccount (`CCRXBYAVZBCBYLYCZCJPLO22LYAIZGLR4QCJNFCHOZL2WAQJFWVGV7R3`)
+### SmartAccount ([`CCRXBYAV...`](https://stellar.expert/explorer/testnet/contract/CCRXBYAVZBCBYLYCZCJPLO22LYAIZGLR4QCJNFCHOZL2WAQJFWVGV7R3))
 
 OpenZeppelin `stellar-accounts` v0.6.0 smart wallet with 15 functions:
 
 - Full `SmartAccount` trait (11 methods): context rules, signers, policies
-- `grant_agent_usdc_access(agent_address, usdc_contract, valid_until_ledger)` — convenience method
+- `grant_agent_usdc_access(agent_address, usdc_contract, valid_until_ledger)`
 - `CustomAccountInterface::__check_auth` — delegates to `do_check_auth`
 - Uses `Signer::Delegated(Address)` for agent G-address authorization
 - `ContextRuleType::CallContract(usdc_address)` scopes auth to USDC contract only
-
-[View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CCRXBYAVZBCBYLYCZCJPLO22LYAIZGLR4QCJNFCHOZL2WAQJFWVGV7R3)
 
 ## MCP Tools
 
 | Tool | Price | Parameters | Description |
 |------|-------|------------|-------------|
-| `get_weather` | $0.001 USDC | `city: string` — city name (e.g., "Lagos", "Tokyo") | Current weather data including temperature, humidity, wind, UV index |
-| `get_xlm_price` | $0.001 USDC | *(none)* | XLM/USDC exchange rate with 24h change, volume, high/low |
-| `analyze_account` | $0.002 USDC | `address: string` — Stellar G-address | Account balances (XLM, USDC), trustlines, transaction count, age |
-| `list_services` | FREE | *(none)* | Lists all available services with names, prices, and descriptions |
+| `get_weather` | $0.001 USDC | `city: string` | Live weather data from wttr.in |
+| `get_xlm_price` | $0.001 USDC | *(none)* | Live XLM/USDC rate from Stellar DEX orderbook |
+| `analyze_account` | $0.001 USDC | `address: string` | Live account data from Stellar Horizon |
+| `list_services` | FREE | *(none)* | Lists all available services with prices |
 
 ## Known Limitations
 
-- **Mock data responses** — Weather, price, and account endpoints return static values. In production these would call real APIs (OpenWeatherMap, DEX aggregator, Horizon).
 - **Testnet only** — All USDC payments use testnet tokens with no real monetary value. Switching to pubnet requires changing the network passphrase and using real USDC.
-- **Dashboard budget meter** — The UI shows wallet balances but does not yet read spending limits from the SmartAccount contract. This is a post-hackathon enhancement.
-- **No persistent payment history** — The MCP server logs payments to stderr but does not store them. The dashboard reads transactions from Horizon which shows all account activity, not just x402 payments.
+- **Local x402 server** — The payment-gated API server runs locally. The Vercel dashboard shows live on-chain data but cannot trigger payments independently.
+- **Dashboard budget meter** — The UI shows wallet balances but does not yet read spending limits from the SmartAccount contract on-chain.
 
 ## Links
 
