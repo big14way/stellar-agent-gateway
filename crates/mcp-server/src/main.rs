@@ -40,16 +40,37 @@ fn default_services() -> Vec<Service> {
         Service {
             name: "get_xlm_price".into(),
             url: "http://localhost:3001/price".into(),
-            description: "Get current XLM/USDC price and 24h market data".into(),
+            description: "Get live XLM/USDC price from Stellar DEX orderbook".into(),
             price_display: "$0.001 USDC".into(),
             price_amount: "10000".into(),
         },
         Service {
             name: "analyze_account".into(),
             url: "http://localhost:3001/account".into(),
-            description: "Analyze a Stellar account's balances and activity".into(),
-            price_display: "$0.002 USDC".into(),
-            price_amount: "20000".into(),
+            description: "Analyze a Stellar account's live balances and trustlines from Horizon".into(),
+            price_display: "$0.001 USDC".into(),
+            price_amount: "10000".into(),
+        },
+        Service {
+            name: "get_dex_trades".into(),
+            url: "http://localhost:3001/dex-trades".into(),
+            description: "Get recent XLM/USDC trades from the Stellar DEX".into(),
+            price_display: "$0.001 USDC".into(),
+            price_amount: "10000".into(),
+        },
+        Service {
+            name: "get_liquidity_pools".into(),
+            url: "http://localhost:3001/liquidity-pools".into(),
+            description: "Get Stellar AMM liquidity pool reserves and stats".into(),
+            price_display: "$0.001 USDC".into(),
+            price_amount: "10000".into(),
+        },
+        Service {
+            name: "get_network_stats".into(),
+            url: "http://localhost:3001/network-stats".into(),
+            description: "Get Stellar network stats: latest ledger, fees, protocol version".into(),
+            price_display: "$0.001 USDC".into(),
+            price_amount: "10000".into(),
         },
     ]
 }
@@ -146,6 +167,12 @@ struct AccountInput {
     address: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DexTradesInput {
+    #[schemars(description = "Number of recent trades to return (1-25, default 10)")]
+    limit: Option<u32>,
+}
+
 // ── MCP server struct ─────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -223,6 +250,49 @@ impl GatewayServer {
         }
     }
 
+    #[tool(description = "Get recent XLM/USDC trades from the Stellar DEX. \
+        Returns trade prices, amounts, and timestamps from Horizon. \
+        COST: $0.001 USDC paid automatically via x402 on Stellar testnet.")]
+    async fn get_dex_trades(
+        &self,
+        Parameters(input): Parameters<DexTradesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = input.limit.unwrap_or(10);
+        let url = format!("{}?limit={}", self.service_url("get_dex_trades"), limit);
+        match call_x402_api(&self.http_client, &url, &self.agent_secret, &self.rpc_url).await {
+            Ok(data) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&data).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+        }
+    }
+
+    #[tool(description = "Get Stellar AMM liquidity pool reserves and stats. \
+        Returns pool reserves, fees, shares, and trustline counts from Horizon. \
+        COST: $0.001 USDC paid automatically via x402 on Stellar testnet.")]
+    async fn get_liquidity_pools(&self) -> Result<CallToolResult, McpError> {
+        let url = self.service_url("get_liquidity_pools");
+        match call_x402_api(&self.http_client, &url, &self.agent_secret, &self.rpc_url).await {
+            Ok(data) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&data).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+        }
+    }
+
+    #[tool(description = "Get Stellar network stats: latest ledger sequence, base fee, \
+        protocol version. Live data from Horizon. \
+        COST: $0.001 USDC paid automatically via x402 on Stellar testnet.")]
+    async fn get_network_stats(&self) -> Result<CallToolResult, McpError> {
+        let url = self.service_url("get_network_stats");
+        match call_x402_api(&self.http_client, &url, &self.agent_secret, &self.rpc_url).await {
+            Ok(data) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&data).unwrap_or_default(),
+            )])),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+        }
+    }
+
     #[tool(description = "List all x402-gated services available in the \
         Stellar Agent Gateway, including names, descriptions, and prices. \
         This tool is FREE — no payment required.")]
@@ -266,12 +336,16 @@ impl ServerHandler for GatewayServer {
                 website_url: None,
             },
             instructions: Some(
-                "Stellar Agent Gateway — 4 tools backed by real x402 micropayments on Stellar.\n\
+                "Stellar Agent Gateway — 7 tools backed by real x402 micropayments on Stellar.\n\
                  Tools:\n\
                  • get_weather(city) — $0.001 USDC\n\
                  • get_xlm_price() — $0.001 USDC\n\
-                 • analyze_account(address) — $0.002 USDC\n\
+                 • analyze_account(address) — $0.001 USDC\n\
+                 • get_dex_trades(limit) — $0.001 USDC\n\
+                 • get_liquidity_pools() — $0.001 USDC\n\
+                 • get_network_stats() — $0.001 USDC\n\
                  • list_services() — FREE\n\
+                 All data is live from Stellar Horizon and DEX.\n\
                  Payments are processed automatically using Soroban auth entry signing."
                     .into(),
             ),

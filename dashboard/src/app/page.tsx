@@ -9,25 +9,46 @@ import {
 
 const SERVICES = [
     {
+        name: "XLM Price Feed",
+        endpoint: "/price",
+        description: "Live XLM/USDC rate from Stellar DEX orderbook",
+        price: "$0.001",
+        tags: ["DEX", "price", "defi"],
+    },
+    {
+        name: "DEX Trade History",
+        endpoint: "/dex-trades",
+        description: "Recent XLM/USDC trades with prices and amounts",
+        price: "$0.001",
+        tags: ["DEX", "trades", "stellar"],
+    },
+    {
+        name: "Liquidity Pools",
+        endpoint: "/liquidity-pools",
+        description: "AMM pool reserves, fees, and share stats",
+        price: "$0.001",
+        tags: ["AMM", "liquidity", "defi"],
+    },
+    {
+        name: "Network Stats",
+        endpoint: "/network-stats",
+        description: "Latest ledger, base fee, protocol version",
+        price: "$0.001",
+        tags: ["network", "ledger", "fees"],
+    },
+    {
+        name: "Account Analyzer",
+        endpoint: "/account",
+        description: "Live account balances and trustlines from Horizon",
+        price: "$0.001",
+        tags: ["analytics", "stellar"],
+    },
+    {
         name: "Weather API",
         endpoint: "/weather?city=Lagos",
         description: "Live weather data from wttr.in",
         price: "$0.001",
         tags: ["weather", "live data"],
-    },
-    {
-        name: "XLM Price Feed",
-        endpoint: "/price",
-        description: "Live XLM/USDC rate from Stellar DEX orderbook",
-        price: "$0.001",
-        tags: ["price", "defi", "DEX"],
-    },
-    {
-        name: "Account Analyzer",
-        endpoint: "/account",
-        description: "Live Stellar account analysis from Horizon",
-        price: "$0.001",
-        tags: ["analytics", "stellar"],
     },
 ];
 

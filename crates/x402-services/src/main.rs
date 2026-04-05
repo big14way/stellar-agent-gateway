@@ -29,9 +29,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Paid routes — x402 middleware
     let paid_routes = Router::new()
-        .route("/weather", get(routes::weather::get_weather))
-        .route("/price",   get(routes::price_feed::get_xlm_price))
-        .route("/account", get(routes::account_analyzer::analyze_account))
+        .route("/weather",         get(routes::weather::get_weather))
+        .route("/price",           get(routes::price_feed::get_xlm_price))
+        .route("/account",         get(routes::account_analyzer::analyze_account))
+        .route("/dex-trades",      get(routes::dex_trades::get_dex_trades))
+        .route("/liquidity-pools", get(routes::liquidity_pools::get_liquidity_pools))
+        .route("/network-stats",   get(routes::network_stats::get_network_stats))
         .layer(middleware::from_fn_with_state(
             config.clone(),
             middleware_x402::x402_payment_guard,

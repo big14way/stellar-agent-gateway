@@ -7,22 +7,23 @@ use shared::{
 use std::time::Duration;
 
 const HORIZON: &str = "https://horizon-testnet.stellar.org";
+const COST_PER_CALL: f64 = 0.001; // $0.001 USDC per API call
 
 fn pause(ms: u64) -> impl std::future::Future<Output = ()> {
     tokio::time::sleep(Duration::from_millis(ms))
 }
 
-async fn get_usdc_balance(address: &str) -> Result<String> {
+async fn get_usdc_balance(address: &str) -> Result<f64> {
     let url = format!("{}/accounts/{}", HORIZON, address);
     let resp: serde_json::Value = reqwest::get(&url).await?.json().await?;
     let empty = vec![];
     let balances = resp["balances"].as_array().unwrap_or(&empty);
     for b in balances {
         if b["asset_code"].as_str() == Some("USDC") {
-            return Ok(b["balance"].as_str().unwrap_or("0").to_string());
+            return Ok(b["balance"].as_str().unwrap_or("0").parse().unwrap_or(0.0));
         }
     }
-    Ok("0".to_string())
+    Ok(0.0)
 }
 
 async fn call_with_payment(
@@ -30,50 +31,28 @@ async fn call_with_payment(
     url: &str,
     agent_secret: &str,
     rpc_url: &str,
-) -> Result<(serde_json::Value, String)> {
+) -> Result<serde_json::Value> {
     let resp = client.get(url).send().await?;
-    let status = resp.status().as_u16();
-
-    if status == 200 {
-        let data: serde_json::Value = resp.json().await?;
-        return Ok((data, "no payment needed".to_string()));
+    if resp.status().as_u16() == 200 {
+        return resp.json().await.map_err(|e| anyhow!("{}", e));
     }
-
-    if status != 402 {
+    if resp.status().as_u16() != 402 {
+        let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("Expected 402, got {}: {}", status, body));
     }
 
     let headers = resp.headers().clone();
-    let pr_header = headers
-        .get("payment-required")
-        .ok_or_else(|| anyhow!("Missing PAYMENT-REQUIRED header"))?
-        .to_str()?;
-
+    let pr_header = headers.get("payment-required")
+        .ok_or_else(|| anyhow!("Missing PAYMENT-REQUIRED header"))?.to_str()?;
     let payment_required: PaymentRequired = decode_header(pr_header)?;
-    let requirements = payment_required
-        .accepts
-        .into_iter()
+    let requirements = payment_required.accepts.into_iter()
         .find(|a| a.network.starts_with("stellar:"))
         .ok_or_else(|| anyhow!("No Stellar payment option"))?;
 
-    let amount = &requirements.amount;
-    let pay_to = &requirements.pay_to;
-
-    println!("      → Received HTTP 402 — Payment Required");
-    println!("        Amount: {} base units USDC", amount);
-    println!("        Pay to: {}...{}", &pay_to[..8], &pay_to[pay_to.len()-8..]);
-    println!("        Network: {}", requirements.network);
-
-    pause(500).await;
-    println!("      → Signing Soroban authorization entry (ed25519)...");
-
+    println!("      → 402 received. Signing Soroban auth entry...");
     let tx_xdr = sign_x402_payment(agent_secret, &requirements, rpc_url).await?;
-    println!("        Signed TX: {}...{} ({} bytes XDR)",
-        &tx_xdr[..16], &tx_xdr[tx_xdr.len()-8..], tx_xdr.len());
-
-    pause(300).await;
-    println!("      → Retrying with PAYMENT-SIGNATURE header...");
+    println!("      → Signed. Retrying with payment...");
 
     let payment_payload = serde_json::json!({
         "x402Version": 2,
@@ -81,22 +60,39 @@ async fn call_with_payment(
         "payload": { "transaction": tx_xdr }
     });
     let encoded = encode_header(&payment_payload);
-
-    let retry = client
-        .get(url)
-        .header("PAYMENT-SIGNATURE", &encoded)
-        .send()
-        .await?;
+    let retry = client.get(url).header("PAYMENT-SIGNATURE", &encoded).send().await?;
 
     let retry_status = retry.status();
     if retry_status.is_success() {
-        println!("      → OZ Facilitator verified ✓ — settling on Stellar testnet...");
-        let data: serde_json::Value = retry.json().await?;
-        Ok((data, format!("{} base units → {}...{}", amount, &pay_to[..8], &pay_to[pay_to.len()-8..])))
+        println!("      → Facilitator verified ✓ — settled on Stellar testnet");
+        retry.json().await.map_err(|e| anyhow!("{}", e))
     } else {
         let body = retry.text().await.unwrap_or_default();
-        Err(anyhow!("Payment rejected (HTTP {}): {}", retry_status, body))
+        Err(anyhow!("Payment rejected ({}): {}", retry_status, body))
     }
+}
+
+struct Budget {
+    limit: f64,
+    spent: f64,
+    calls: u32,
+}
+
+impl Budget {
+    fn new(limit: f64) -> Self { Self { limit, spent: 0.0, calls: 0 } }
+
+    fn check(&self, cost: f64) -> bool { self.spent + cost <= self.limit }
+
+    fn spend(&mut self, cost: f64) {
+        self.spent += cost;
+        self.calls += 1;
+    }
+
+    fn display(&self) -> String {
+        format!("${:.4} / ${:.4} ({} calls)", self.spent, self.limit, self.calls)
+    }
+
+    fn remaining(&self) -> f64 { self.limit - self.spent }
 }
 
 #[tokio::main]
@@ -109,207 +105,223 @@ async fn main() -> Result<()> {
 
     println!();
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║        Stellar Agent Gateway — Live Demo                      ║");
-    println!("║        x402 Micropayments on Stellar Testnet                  ║");
-    println!("╚═════════════════════════════════��══════════════════════���═══════╝");
+    println!("║   Stellar Agent Gateway — Live Demo                          ║");
+    println!("║   x402 Micropayments · Soroban Smart Contracts · Stellar     ║");
+    println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
-    println!("  This demo simulates an AI agent autonomously paying for");
-    println!("  API services using real USDC on Stellar testnet.");
-    println!("  Each API call triggers a Soroban auth entry signing,");
-    println!("  OZ Facilitator verification, and on-chain settlement.");
+    println!("  An AI agent autonomously pays for Stellar data services");
+    println!("  using real USDC on testnet. Every payment settles on-chain.");
     println!();
 
-    // ── Preflight ──────────────────────────────────────────────────────
-    println!("━━━ Preflight Checks ━━━");
+    // ── Preflight ─────────────────────────────────────────────────────
+    println!("━━━ Preflight ━━━");
     println!();
 
-    print!("  x402 services server...... ");
+    print!("  x402 services............ ");
     let health = client.get(format!("{}/health", base)).send().await;
     match health {
         Ok(r) if r.status().is_success() => println!("✅ online (port {})", config.port),
-        _ => {
-            println!("❌ offline");
-            println!("\n  Start the server first: make dev-services");
-            return Ok(());
-        }
+        _ => { println!("❌ offline — run: make dev-services"); return Ok(()); }
     }
-
-    print!("  Agent address............. ");
-    println!("{}", config.agent_stellar_address);
-    print!("  Server address............ ");
-    println!("{}", config.server_stellar_address);
 
     let agent_before = get_usdc_balance(&config.agent_stellar_address).await?;
     let server_before = get_usdc_balance(&config.server_stellar_address).await?;
-    println!("  Agent USDC balance........ {} USDC", agent_before);
-    println!("  Server USDC balance....... {} USDC", server_before);
-    println!("  OZ Facilitator............ {}", config.facilitator_url);
-    println!("  Stellar RPC............... {}", config.stellar_rpc_url);
+    println!("  Agent.................... {} (${:.7} USDC)", &config.agent_stellar_address[..12], agent_before);
+    println!("  Server................... {} (${:.7} USDC)", &config.server_stellar_address[..12], server_before);
+
+    // ── Session Budget ────────────────────────────────────────────────
+    let session_budget = 0.01; // $0.01 USDC max for this session
+    let mut budget = Budget::new(session_budget);
+
+    println!();
+    println!("  ┌─────────────────────────────────────────────┐");
+    println!("  │  Session Budget: ${:.4} USDC               │", session_budget);
+    println!("  │  Cost per call:  ${:.4} USDC               │", COST_PER_CALL);
+    println!("  │  Max calls:      {}                          │", (session_budget / COST_PER_CALL) as u32);
+    println!("  └─────────────────────────────────────────────┘");
     println!();
 
-    // ── Scenario: AI Agent Portfolio Analysis ──────────────────────────
-    println!("━━━ Scenario: AI Agent Performs Portfolio Analysis ━━━");
+    pause(1000).await;
+
+    // ── Scenario ──────────────────────────────────────────────────────
+    println!("━━━ Scenario: Comprehensive Stellar Market Analysis ━━━");
     println!();
-    println!("  An AI agent is asked: \"Analyze my Stellar portfolio.\"");
-    println!("  It autonomously decides to call 3 paid APIs:");
-    println!("    1. Get live XLM/USDC price    ($0.001 USDC)");
-    println!("    2. Analyze the account on-chain ($0.001 USDC)");
-    println!("    3. Check weather in agent's city ($0.001 USDC)");
-    println!("  Each call is gated by x402 — agent pays per request.");
+    println!("  Agent is asked: \"Give me a full Stellar market report.\"");
+    println!("  It plans 5 autonomous paid API calls:");
+    println!("    1. XLM/USDC price (Stellar DEX)");
+    println!("    2. Recent DEX trades");
+    println!("    3. Liquidity pool reserves");
+    println!("    4. Network stats (ledger, fees)");
+    println!("    5. Agent account analysis (Horizon)");
     println!();
 
     pause(1500).await;
 
-    // ── Step 1: XLM Price ─────────────────────────────────────────────
+    // ── Tool 1: XLM Price ─────────────────────────────────────────────
     println!("┌─────────────────────────────────────────────────────────┐");
-    println!("│  Step 1: Get XLM/USDC Price (live from Stellar DEX)    │");
-    println!("└───────���────────────────────────────���────────────────────┘");
-    println!("  Agent calls: GET {}/price", base);
-    println!();
-
-    let mut xlm_price = String::from("unknown");
-    match call_with_payment(&client, &format!("{}/price", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
-        Ok((data, payment)) => {
-            println!();
-            println!("      ✅ Payment settled: {}", payment);
-            if let Some(p) = data["price_usdc"].as_str() { xlm_price = p.to_string(); }
-            println!("      📊 XLM/USDC: {}", data["price_usdc"].as_str().unwrap_or("?"));
-            println!("         Bid: {}  Ask: {}",
-                data["best_bid"].as_str().unwrap_or("?"),
-                data["best_ask"].as_str().unwrap_or("?"));
-            println!("         Source: {}", data["source"].as_str().unwrap_or("?"));
+    println!("│  1/5  XLM/USDC Price (Stellar DEX Orderbook)           │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    if !budget.check(COST_PER_CALL) {
+        println!("  ⛔ Budget exceeded! Remaining: ${:.4}", budget.remaining());
+    } else {
+        println!("  Budget: {} → spending ${:.4}...", budget.display(), COST_PER_CALL);
+        match call_with_payment(&client, &format!("{}/price", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
+            Ok(data) => {
+                budget.spend(COST_PER_CALL);
+                println!("      ✅ XLM/USDC: {}  (source: {})",
+                    data["price_usdc"].as_str().unwrap_or("?"),
+                    data["source"].as_str().unwrap_or("?"));
+            }
+            Err(e) => println!("      ❌ {}", e),
         }
-        Err(e) => println!("      ❌ {}", e),
     }
     println!();
+    pause(800).await;
 
-    pause(1000).await;
-
-    // ── Step 2: Account Analysis ──────────────────────────────────────
-    println!("┌───────────────────────────────���─────────────────────────┐");
-    println!("│  Step 2: Analyze Stellar Account (live from Horizon)   │");
-    println!("└────────���────────────────────────────────���───────────────┘");
-    println!("  Agent calls: GET {}/account?address={}...{}",
-        base, &config.agent_stellar_address[..8], &config.agent_stellar_address[config.agent_stellar_address.len()-4..]);
-    println!();
-
-    let mut agent_xlm = String::from("0");
-    let mut agent_usdc_live = String::from("0");
-    let url = format!("{}/account?address={}", base, config.agent_stellar_address);
-    match call_with_payment(&client, &url, &config.agent_secret_key, &config.stellar_rpc_url).await {
-        Ok((data, payment)) => {
-            println!();
-            println!("      ✅ Payment settled: {}", payment);
-            if let Some(balances) = data["balances"].as_array() {
-                println!("      💰 Account Balances:");
-                for b in balances {
-                    let asset = b["asset"].as_str().unwrap_or("?");
-                    let bal = b["balance"].as_str().unwrap_or("0");
-                    println!("         {} → {}", asset, bal);
-                    if asset.starts_with("XLM") { agent_xlm = bal.to_string(); }
-                    if asset.starts_with("USDC") { agent_usdc_live = bal.to_string(); }
+    // ── Tool 2: DEX Trades ────────────────────────────────────────────
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│  2/5  Recent DEX Trades (XLM/USDC)                     │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    if !budget.check(COST_PER_CALL) {
+        println!("  ⛔ Budget exceeded!");
+    } else {
+        println!("  Budget: {} → spending ${:.4}...", budget.display(), COST_PER_CALL);
+        match call_with_payment(&client, &format!("{}/dex-trades?limit=5", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
+            Ok(data) => {
+                budget.spend(COST_PER_CALL);
+                let count = data["count"].as_u64().unwrap_or(0);
+                println!("      ✅ {} recent trades retrieved", count);
+                if let Some(trades) = data["trades"].as_array() {
+                    for t in trades.iter().take(3) {
+                        println!("         {} XLM @ {} USDC ({})",
+                            t["base_amount"].as_str().unwrap_or("?"),
+                            t["price"].as_str().unwrap_or("?"),
+                            &t["ledger_close_time"].as_str().unwrap_or("?")[..19]);
+                    }
                 }
             }
-            println!("         Trustlines: {}", data["trustline_count"]);
-            println!("         Source: {}", data["source"].as_str().unwrap_or("?"));
+            Err(e) => println!("      ❌ {}", e),
         }
-        Err(e) => println!("      ❌ {}", e),
     }
     println!();
+    pause(800).await;
 
-    pause(1000).await;
-
-    // ── Step 3: Weather ───────────────────────────────────────────────
-    println!("┌─────────���─────────────────���─────────────────────────────┐");
-    println!("│  Step 3: Get Weather Data (live from wttr.in)          │");
-    println!("└─────��───────────────────────────────────��───────────────┘");
-    println!("  Agent calls: GET {}/weather?city=Lagos", base);
-    println!();
-
-    let mut weather_temp = String::from("?");
-    let mut weather_cond = String::from("?");
-    match call_with_payment(&client, &format!("{}/weather?city=Lagos", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
-        Ok((data, payment)) => {
-            println!();
-            println!("      ✅ Payment settled: {}", payment);
-            if let Some(t) = data["temp_c"].as_f64() { weather_temp = format!("{:.1}°C", t); }
-            if let Some(c) = data["condition"].as_str() { weather_cond = c.to_string(); }
-            println!("      🌤  Lagos: {} — {}", weather_temp, weather_cond);
-            println!("         Humidity: {}%  Wind: {} km/h",
-                data["humidity_pct"].as_u64().unwrap_or(0),
-                data["wind_kph"].as_f64().unwrap_or(0.0));
-            println!("         Source: {}", data["source"].as_str().unwrap_or("?"));
-        }
-        Err(e) => println!("      ❌ {}", e),
-    }
-    println!();
-
-    pause(1000).await;
-
-    // ── Agent Synthesizes Report ──────────────────────────────────────
+    // ── Tool 3: Liquidity Pools ───────────────────────────────────────
     println!("┌─────────────────────────────────────────────────────────┐");
-    println!("│  Agent Synthesizes Portfolio Report                     │");
-    println!("└──���───────────────────────────────��──────────────────────���");
+    println!("│  3/5  AMM Liquidity Pools                              │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    if !budget.check(COST_PER_CALL) {
+        println!("  ⛔ Budget exceeded!");
+    } else {
+        println!("  Budget: {} → spending ${:.4}...", budget.display(), COST_PER_CALL);
+        match call_with_payment(&client, &format!("{}/liquidity-pools", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
+            Ok(data) => {
+                budget.spend(COST_PER_CALL);
+                let count = data["count"].as_u64().unwrap_or(0);
+                println!("      ✅ {} liquidity pools found", count);
+                if let Some(pools) = data["pools"].as_array() {
+                    for p in pools.iter().take(3) {
+                        let reserves: Vec<String> = p["reserves"].as_array().unwrap_or(&vec![]).iter()
+                            .map(|r| format!("{} {}", r["amount"].as_str().unwrap_or("0"), r["asset"].as_str().unwrap_or("?")))
+                            .collect();
+                        println!("         Pool {} — {}", p["id"].as_str().unwrap_or("?"), reserves.join(" / "));
+                    }
+                }
+            }
+            Err(e) => println!("      ❌ {}", e),
+        }
+    }
+    println!();
+    pause(800).await;
+
+    // ── Tool 4: Network Stats ─────────────────────────────────────────
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│  4/5  Stellar Network Stats                            │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    if !budget.check(COST_PER_CALL) {
+        println!("  ⛔ Budget exceeded!");
+    } else {
+        println!("  Budget: {} → spending ${:.4}...", budget.display(), COST_PER_CALL);
+        match call_with_payment(&client, &format!("{}/network-stats", base), &config.agent_secret_key, &config.stellar_rpc_url).await {
+            Ok(data) => {
+                budget.spend(COST_PER_CALL);
+                println!("      ✅ Ledger: #{}  Protocol: v{}  Base fee: {} stroops",
+                    data["latest_ledger"].as_u64().unwrap_or(0),
+                    data["protocol_version"].as_u64().unwrap_or(0),
+                    data["base_fee_stroops"].as_str().unwrap_or("?"));
+            }
+            Err(e) => println!("      ❌ {}", e),
+        }
+    }
+    println!();
+    pause(800).await;
+
+    // ── Tool 5: Account Analysis ──────────────────────────────────────
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│  5/5  Agent Account Analysis (Horizon)                 │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    if !budget.check(COST_PER_CALL) {
+        println!("  ⛔ Budget exceeded!");
+    } else {
+        println!("  Budget: {} → spending ${:.4}...", budget.display(), COST_PER_CALL);
+        let url = format!("{}/account?address={}", base, config.agent_stellar_address);
+        match call_with_payment(&client, &url, &config.agent_secret_key, &config.stellar_rpc_url).await {
+            Ok(data) => {
+                budget.spend(COST_PER_CALL);
+                println!("      ✅ Account funded: {}", data["is_funded"]);
+                if let Some(balances) = data["balances"].as_array() {
+                    for b in balances {
+                        println!("         {} → {}", b["asset"].as_str().unwrap_or("?"), b["balance"].as_str().unwrap_or("0"));
+                    }
+                }
+            }
+            Err(e) => println!("      ❌ {}", e),
+        }
+    }
     println!();
 
-    let xlm_f: f64 = agent_xlm.parse().unwrap_or(0.0);
-    let price_f: f64 = xlm_price.parse().unwrap_or(0.0);
-    let xlm_value = xlm_f * price_f;
+    pause(1000).await;
 
-    println!("  📋 Portfolio Summary for {}...{}",
-        &config.agent_stellar_address[..8],
-        &config.agent_stellar_address[config.agent_stellar_address.len()-4..]);
-    println!("  ─────────────────────────────────────────────");
-    println!("  XLM Balance:    {} XLM", agent_xlm);
-    println!("  XLM/USDC Rate:  {} USDC", xlm_price);
-    println!("  XLM Value:      ${:.2} USDC", xlm_value);
-    println!("  USDC Balance:   {} USDC", agent_usdc_live);
-    println!("  Total Value:    ~${:.2} USDC", xlm_value + agent_usdc_live.parse::<f64>().unwrap_or(0.0));
-    println!("  ─────────────────────────────────────────────");
-    println!("  Weather:        Lagos — {} {}", weather_temp, weather_cond);
-    println!("  Data sources:   Stellar DEX, Horizon, wttr.in");
-    println!("  Payments:       3 x402 micropayments on Stellar testnet");
+    // ── Session Summary ───────────────────────────────────────────────
+    println!("━━━ Session Summary ━━━");
+    println!();
+    println!("  Budget used:  {}", budget.display());
+    println!("  Remaining:    ${:.4} USDC", budget.remaining());
     println!();
 
-    // ── On-Chain Settlement Verification ──────────────────────────────
+    // ── On-Chain Verification ─────────────────────────────────────────
     println!("━━━ On-Chain Settlement Verification ━━━");
     println!();
-    print!("  Waiting for settlement finality");
-    for _ in 0..5 {
-        pause(1000).await;
-        print!(".");
-    }
+    print!("  Waiting for finality");
+    for _ in 0..5 { pause(1000).await; print!("."); }
     println!(" done");
     println!();
 
     let agent_after = get_usdc_balance(&config.agent_stellar_address).await?;
     let server_after = get_usdc_balance(&config.server_stellar_address).await?;
+    let agent_spent = agent_before - agent_after;
+    let server_earned = server_after - server_before;
 
-    let agent_spent: f64 = agent_before.parse::<f64>()? - agent_after.parse::<f64>()?;
-    let server_earned: f64 = server_after.parse::<f64>()? - server_before.parse::<f64>()?;
-
-    println!("  Agent  USDC: {} → {}  (spent: ${:.7})", agent_before, agent_after, agent_spent);
-    println!("  Server USDC: {} → {} (earned: ${:.7})", server_before, server_after, server_earned);
-    println!();
+    println!("  Agent  USDC: ${:.7} → ${:.7}  (spent: ${:.7})", agent_before, agent_after, agent_spent);
+    println!("  Server USDC: ${:.7} → ${:.7} (earned: ${:.7})", server_before, server_after, server_earned);
 
     if agent_spent > 0.0 {
-        println!("  ✅ Real USDC moved on-chain!");
+        println!();
+        println!("  ✅ {} API calls, ${:.7} USDC settled on Stellar testnet", budget.calls, agent_spent);
         println!();
         println!("  🔗 Verify on Stellar Expert:");
         println!("     Agent:  https://stellar.expert/explorer/testnet/account/{}", config.agent_stellar_address);
         println!("     Server: https://stellar.expert/explorer/testnet/account/{}", config.server_stellar_address);
-    } else {
-        println!("  ⏳ Settlement processing — check Stellar Expert in a moment.");
     }
 
     println!();
-    println!("  Contracts deployed on testnet:");
+    println!("  Contracts on testnet:");
     println!("     ServiceRegistry: {}", config.service_registry_contract);
     println!("     SmartAccount:    {}", config.smart_account_contract);
     println!();
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  Demo complete. 3 API calls, 3 x402 payments, all on-chain.  ║");
-    println!("╚══���═════════════════════════════════════════════════════════════╝");
+    println!("║  Demo complete. {} API calls · {} x402 payments · all on-chain  ║", budget.calls, budget.calls);
+    println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
 
     Ok(())
